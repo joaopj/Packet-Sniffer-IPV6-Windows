@@ -1,4 +1,4 @@
-import socket
+from scapy.all import sniff, Ether, IP, IPv6, TCP, UDP, ICMP, ICMPv6EchoRequest, ICMPv6EchoReply, Raw
 import struct
 import textwrap
 import time
@@ -14,16 +14,10 @@ PCAP_ACCUR_TIMSTAMP = 0
 PCAP_MAX_LENGTH_CAP = 65535
 PCAP_DATA_LINK_TYPE = 1
 
-
 class Pcap:
     def __init__(self, filename, link_type=PCAP_DATA_LINK_TYPE):
-        self.pcap_file = open(filename, 'wb')  # 4 + 2 + 2 + 4 + 4 + 4 + 4
-        self.pcap_file.write(struct.pack('@ I H H i I I I ', PCAP_MAGICAL_NUMBER, PCAP_MJ_VERN_NUMBER, PCAP_MI_VERN_NUMBER, PCAP_LOCAL_CORECTIN, PCAP_ACCUR_TIMSTAMP, PCAP_MAX_LENGTH_CAP, link_type))
-
-    def write_list(self, data=[]):
-        for i in data:
-            self.write(i)
-        return
+        self.pcap_file = open(filename, 'wb')
+        self.pcap_file.write(struct.pack(PCAP_GLOBAL_HEADER_FMT, PCAP_MAGICAL_NUMBER, PCAP_MJ_VERN_NUMBER, PCAP_MI_VERN_NUMBER, PCAP_LOCAL_CORECTIN, PCAP_ACCUR_TIMSTAMP, PCAP_MAX_LENGTH_CAP, link_type))
 
     def write(self, data):
         ts_sec, ts_usec = map(int, str(time.time()).split('.'))
@@ -34,7 +28,6 @@ class Pcap:
     def close(self):
         self.pcap_file.close()
 
-
 class HTTP:
     def __init__(self, raw_data):
         try:
@@ -42,136 +35,114 @@ class HTTP:
         except:
             self.data = raw_data
 
+def process_packet(packet):
+    pcap.write(bytes(packet))
+    pcap.pcap_file.flush()
 
-def main():
-    File = Pcap('Temp.pcap')
-    conn = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
-    while True:
-        raw_data, addr = conn.recvfrom(65536)
-        dest_mac, src_mac, eth_proto, data = ethernet_frame(raw_data)
+    if Ether in packet:
+        eth = packet[Ether]
         print('\nEthernet Frame:')
-        print('\t -' + 'Destination: {}, Source: {}, Protocol: {}'.format(dest_mac, src_mac, eth_proto))
-        File.write(raw_data)
-        File.pcap_file.flush()
+        print(f'\t - Destination: {eth.dst}, Source: {eth.src}, Type: {eth.type}')
 
-        # 8 for IPv4
-        if eth_proto == 8:
-            (version, header_length, ttl, proto, src, target, data) = ipv4_packet(data)
-            print('\t - ' + 'IPv4 packet:')
-            print('\t\t - ' + 'Version: {}, Header Length: {}, TTL: {}'.format(version, header_length, ttl))
-            print('\t\t - ' + 'Protocol: {}, Source: {}, Target: {}'.format(proto, src, target))
+    if IP in packet:
+        ip = packet[IP]
+        print('\t - IPv4 Packet:')
+        print(f'\t\t - Version: {ip.version}, Header Length: {ip.ihl * 4}, TTL: {ip.ttl}')
+        print(f'\t\t - Protocol: {ip.proto}, Source: {ip.src}, Target: {ip.dst}')
 
-            # ICMP
-            if proto == 1:
-                icmp_type, code, checksum, data = icmp_pack(data)
-                print('\t - ' + 'ICMP packet:')
-                print('\t\t - ' + 'Type: {}, Code: {}, Checksum: {}'.format(icmp_type, code, checksum))
-                print('\t - ' + 'Data:')
-                print(format_multi_line('\t\t\t', data))
+        if ip.proto == 1:  # ICMP
+            icmp = packet[ICMP]
+            print('\t - ICMP Packet:')
+            print(f'\t\t - Type: {icmp.type}, Code: {icmp.code}, Checksum: {icmp.chksum}')
+            print('\t - Data:')
+            if Raw in packet:
+                print(format_multi_line('\t\t\t', packet[Raw].load))
 
-            # TCP
-            elif proto == 6:
-                (src_port, dest_port, sequence, acknowledgement, flag_urg, flag_ack, flag_psh, flag_rst, flag_syn, flag_fin, data) = tcp_segment(data)
-                print('\t - ' + 'TCP Segment: ')
-                print('\t\t - ' + 'Source Port: {} , Destination Port : {}'.format(src_port, dest_port))
-                print('\t\t - ' + 'Sequence: {} , Acknowledgement : {}'.format(sequence, acknowledgement))
-                print('\t\t - ' + 'Flags: ')
-                print('\t\t\t - ' + 'URG: {}, ACK: {}, PSH: {}, RST: {}, SYN: {}, FIN: {}'.format(flag_urg, flag_ack, flag_psh, flag_rst, flag_syn, flag_fin))
+        elif ip.proto == 6:  # TCP
+            tcp = packet[TCP]
+            print('\t - TCP Segment:')
+            print(f'\t\t - Source Port: {tcp.sport}, Destination Port: {tcp.dport}')
+            print(f'\t\t - Sequence: {tcp.seq}, Acknowledgement: {tcp.ack}')
+            print(f'\t\t - Flags:')
+            print(f'\t\t\t - URG: {tcp.flags & 0x20}, ACK: {tcp.flags & 0x10}, PSH: {tcp.flags & 0x08}, RST: {tcp.flags & 0x04}, SYN: {tcp.flags & 0x02}, FIN: {tcp.flags & 0x01}')
 
-                if len(data) > 0:
-                    # HTTP
-                    if src_port == 80 or dest_port == 80:
-                        print('\t\t - ' + 'HTTP Data:')
-                        try:
-                            http = HTTP(data)
-                            http_info = str(http.data).split('\n')
-                            for line in http_info:
-                                print('\t\t\t - ' + str(line))
-                        except:
-                            print(format_multi_line('\t\t\t - ', data))
+            if Raw in packet:
+                if tcp.sport == 80 or tcp.dport == 80:
+                    print('\t\t - HTTP Data:')
+                    http = HTTP(packet[Raw].load)
+                    http_info = str(http.data).split('\n')
+                    for line in http_info:
+                        print(f'\t\t\t - {line}')
+                else:
+                    print('\t\t - TCP Data:')
+                    print(format_multi_line('\t\t\t', packet[Raw].load))
 
-                    else:
-                        print('\t\t - ' + 'TCP Data:')
-                        print(format_multi_line('\t\t\t - ', data))
-
-            # UDP
-            elif proto == 17:
-                src_port, dest_port, length, data = udp_segment(data)
-                print('\t - ' + 'UDP Segment: ')
-                print('\t\t - ' + 'Source Port: {}, Destination Port: {}, Length: {}'.format(src_port, dest_port, length))
-
-            # Other
-            else:
-                print('\t - ' + 'Data : ')
-                print(format_multi_line('\t\t ', data))
-
+        elif ip.proto == 17:  # UDP
+            udp = packet[UDP]
+            print('\t - UDP Segment:')
+            print(f'\t\t - Source Port: {udp.sport}, Destination Port: {udp.dport}, Length: {udp.len}')
+            if Raw in packet:
+                print('\t\t - UDP Data:')
+                print(format_multi_line('\t\t\t', packet[Raw].load))
         else:
-            print('\t - ' + 'Data: ')
-            print(format_multi_line('\t\t', data))
+            if Raw in packet:
+                print('\t - Data:')
+                print(format_multi_line('\t\t', packet[Raw].load))
 
-    File.close()
+    elif IPv6 in packet:
+        ipv6 = packet[IPv6]
+        print('\t - IPv6 Packet:')
+        print(f'\t\t - Version: {ipv6.version}, Traffic Class: {ipv6.tc}, Flow Label: {ipv6.fl}')
+        print(f'\t\t - Payload Length: {ipv6.plen}, Next Header: {ipv6.nh}, Hop Limit: {ipv6.hlim}')
+        print(f'\t\t - Source: {ipv6.src}, Destination: {ipv6.dst}')
 
+        if ipv6.nh == 58:  # ICMPv6
+            if ICMPv6EchoRequest in packet:
+                icmpv6 = packet[ICMPv6EchoRequest]
+                print('\t - ICMPv6 Echo Request:')
+                print(f'\t\t - Identifier: {icmpv6.id}, Sequence Number: {icmpv6.seq}')
+                print('\t - Data:')
+                if Raw in packet:
+                    print(format_multi_line('\t\t\t', packet[Raw].load))
 
-# unpack ethernet frame
-def ethernet_frame(data):
-    dest_mac, src_mac, proto = struct.unpack('! 6s 6s H', data[:14])
-    return get_mac_addr(dest_mac), get_mac_addr(src_mac), socket.htons(proto), data[14:]
+            elif ICMPv6EchoReply in packet:
+                icmpv6 = packet[ICMPv6EchoReply]
+                print('\t - ICMPv6 Echo Reply:')
+                print(f'\t\t - Identifier: {icmpv6.id}, Sequence Number: {icmpv6.seq}')
+                print('\t - Data:')
+                if Raw in packet:
+                    print(format_multi_line('\t\t\t', packet[Raw].load))
 
+        elif ipv6.nh == 6:  # TCP
+            tcp = packet[TCP]
+            print('\t - TCP Segment:')
+            print(f'\t\t - Source Port: {tcp.sport}, Destination Port: {tcp.dport}')
+            print(f'\t\t - Sequence: {tcp.seq}, Acknowledgement: {tcp.ack}')
+            print(f'\t\t - Flags:')
+            print(f'\t\t\t - URG: {tcp.flags & 0x20}, ACK: {tcp.flags & 0x10}, PSH: {tcp.flags & 0x08}, RST: {tcp.flags & 0x04}, SYN: {tcp.flags & 0x02}, FIN: {tcp.flags & 0x01}')
 
-# return properly formatted MAC address (ie AA:BB:CC:DD:EE:FF)
-def get_mac_addr(bytes_addr):
-    bytes_str = map('{:02x}'.format, bytes_addr)
-    return ':'.join(bytes_str).upper()
+            if Raw in packet:
+                if tcp.sport == 80 or tcp.dport == 80:
+                    print('\t\t - HTTP Data:')
+                    http = HTTP(packet[Raw].load)
+                    http_info = str(http.data).split('\n')
+                    for line in http_info:
+                        print(f'\t\t\t - {line}')
+                else:
+                    print('\t\t - TCP Data:')
+                    print(format_multi_line('\t\t\t', packet[Raw].load))
 
-
-# Unpacks IPv4 packet
-def ipv4_packet(data):
-    version_header_length = data[0]
-    version = version_header_length >> 4
-    header_length = (version_header_length & 15) * 4
-    ttl, proto, src, target = struct.unpack('! 8x B B 2x 4s 4s', data[:20])
-    return version, header_length, ttl, proto, ipv4(src), ipv4(target), data[header_length:]
-
-
-# return properly formatted IPv4 address (ie 127.0.0.1)
-def ipv4(addr):
-    return '.'.join(map(str, addr))
-
-
-# Unpacks ICMP packet
-def icmp_pack(data):
-    icmp_type, code, checksum = struct.unpack('! B B H', data[:4])
-    return icmp_type, code, checksum, data[4:]
-
-
-# Unpacks TCP segments
-def tcp_segment(data):
-    (src_port, dest_port, sequence, acknowledgement, offset_reserved_flag) = struct.unpack('! H H L L H', data[:14])
-    offset = (offset_reserved_flag >> 12) * 4
-    flag_urg = (offset_reserved_flag & 32) >> 5
-    flag_ack = (offset_reserved_flag & 16) >> 4
-    flag_psh = (offset_reserved_flag & 8) >> 3
-    flag_rst = (offset_reserved_flag & 4) >> 2
-    flag_syn = (offset_reserved_flag & 2) >> 1
-    flag_fin = offset_reserved_flag & 1
-    return src_port, dest_port, sequence, acknowledgement, flag_urg, flag_ack, flag_psh, flag_rst, flag_syn, flag_fin, data[offset:]
-
-
-# Unpacks UDP segments
-def udp_segment(data):
-    src_port, dest_port, length = struct.unpack('! H H 2x H', data[:8])
-    return src_port, dest_port, length, data[8:]
-
-
-def http_header(packet):
-    http_packet = str(packet)
-    if http_packet.find('GET'):
-        return GET_print(packet)
-
-
-def GET_print(packet1):
-    return "".join(packet1.sprintf("{Raw:%Raw.load%}\n").split(r"\r\n"))
-
+        elif ipv6.nh == 17:  # UDP
+            udp = packet[UDP]
+            print('\t - UDP Segment:')
+            print(f'\t\t - Source Port: {udp.sport}, Destination Port: {udp.dport}, Length: {udp.len}')
+            if Raw in packet:
+                print('\t\t - UDP Data:')
+                print(format_multi_line('\t\t\t', packet[Raw].load))
+        else:
+            if Raw in packet:
+                print('\t - Data:')
+                print(format_multi_line('\t\t', packet[Raw].load))
 
 def format_multi_line(pre, string, size=80):
     size -= len(pre)
@@ -179,7 +150,14 @@ def format_multi_line(pre, string, size=80):
         string = ''.join(r'\x{:02x}'.format(byte) for byte in string)
         if size % 2:
             size -= 1
-    return '\n'.join([pre+line for line in textwrap.wrap(string, size)])
+    return '\n'.join([pre + line for line in textwrap.wrap(string, size)])
 
-
-main()
+if __name__ == "__main__":
+    pcap = Pcap('Temp.pcap')
+    try:
+        sniff(prn=process_packet)
+    except KeyboardInterrupt:
+        print("\nInterrupted, closing file.")
+    finally:
+        pcap.close()
+        print("File closed.")
